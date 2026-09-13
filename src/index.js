@@ -2,7 +2,9 @@
  * Worker 入口：HTTP 路由 + WebSocket 升级分发到 Durable Object。
  *
  * 路由规则：
- * - GET /health               健康检查（无状态、零信息泄露，仅 {"ok":true}）
+ * - GET <HEALTH_PATH>          健康检查（无状态、零信息泄露，仅 {"ok":true}）
+ *                             默认 /health；配置 HEALTH_PATH 后仅该路径生效，
+ *                             原 /health 返回 404（防指纹扫描）
  * - GET <METRICS_PATH>        统计端点：自定义安全路径 + METRICS_TOKEN 双重防护
  *                             （不配置 METRICS_PATH 则完全禁用，默认 404）
  * - GET <ADMIN_PATH>          Web 管理端页面壳（无数据）
@@ -90,12 +92,43 @@ function resolveRoomId(request, url, env) {
 }
 
 /** WebSocket 升级的保留路径：健康检查、统计/管理端点（含未启用时的默认字面量） */
-function isReservedPath(pathname, metricsPath, adminPath) {
-  if (pathname === '/health' || pathname === '/favicon.ico') return true;
+function isReservedPath(pathname, metricsPath, adminPath, healthPath) {
+  if (pathname === '/favicon.ico') return true;
+  if (pathname === healthPath) return true; // healthPath 已含未配置时的默认 /health
   if (pathname === '/metrics') return true; // 未启用时也保留（禁用即 404）
   if (metricsPath && pathname === metricsPath) return true;
   if (adminPath && (pathname === adminPath || pathname.startsWith(adminPath + '/'))) return true;
   return false;
+}
+
+/**
+ * 边缘层 socket 黑名单 isolate 缓存（v1.4.0）：
+ * TTL 内的 WS 升级直接用缓存判定，不再每次连 KV。安全语义是
+ * 「只延后拦截、绝不漏放」——缓存未命中（含 KV 读失败）照旧放行，
+ * 由 DO 升级/握手层的权威黑名单兜底。代价仅是新拉黑 IP 的边缘拦截
+ * 延后至多 TTL（叠加 KV 最终一致的约 1 分钟）。IP_BLOCK_CACHE_MS=0 关闭。
+ */
+const blCache = { at: 0, list: null };
+
+function intEnv(env, key, def) {
+  const v = env && env[key];
+  if (v === undefined || v === null || v === '') return def;
+  const n = Number(v);
+  return Number.isFinite(n) && n >= 0 ? n : def;
+}
+
+async function lookupSocketBlacklist(env, ttlMs) {
+  if (ttlMs > 0) {
+    const now = Date.now();
+    if (now - blCache.at < ttlMs) return blCache.list;
+    const raw = await env.AUDIT_KV.get(BL_SOCKET_KV_KEY, 'json');
+    const list = Array.isArray(raw) ? raw : null;
+    blCache.at = now;
+    blCache.list = list;
+    return list;
+  }
+  const raw = await env.AUDIT_KV.get(BL_SOCKET_KV_KEY, 'json');
+  return Array.isArray(raw) ? raw : null;
 }
 
 export default {
@@ -103,9 +136,11 @@ export default {
     const url = new URL(request.url);
     const metricsPath = normalizePath(env.METRICS_PATH);
     const adminPath = normalizePath(env.ADMIN_PATH);
+    const healthPath = normalizePath(env.HEALTH_PATH) || '/health';
 
     // 健康检查（无状态；P0 整改：仅返回 {"ok":true}，零指纹）
-    if (url.pathname === '/health') {
+    // v1.4.0：HEALTH_PATH 可自定义，配置后原 /health 返回 404（防指纹扫描）
+    if (url.pathname === healthPath) {
       return Response.json({ ok: true });
     }
 
@@ -131,19 +166,23 @@ export default {
 
     // WebSocket 升级（EasyTier 客户端）
     if (request.headers.get('Upgrade') === 'websocket'
-        && !isReservedPath(url.pathname, metricsPath, adminPath)) {
-      // 边缘层 socket（IP）黑名单拦截（v1.3.0）：直接读 KV 的 bl:socket 一条键，
-      // 命中立即 403 —— 不唤醒 Durable Object，被拉黑客户端的重连风暴
+        && !isReservedPath(url.pathname, metricsPath, adminPath, healthPath)) {
+      // 边缘层 socket（IP）黑名单拦截（v1.3.0）：被拉黑客户端的重连风暴
       // 只消耗 Worker 请求额度，不再消耗 DO 请求与时长计费。
+      // v1.4.0：黑名单 KV 读取加 isolate 缓存（IP_BLOCK_CACHE_MS，默认 30s），
+      // 重连风暴时 KV 读从每次连接 1 次降为每 TTL 1 次。只延后拦截、
+      // 绝不漏放：缓存未命中（含 KV 读失败）照旧放行走 DO 权威检查。
       // - CF-Connecting-IP 由 Cloudflare 边缘注入，客户端不可伪造（生产环境）；
-      // - KV 为最终一致（约 1 分钟）：新拉黑的 IP 由 DO 升级/握手层权威兜底，
-      //   解除封锁后至多约 1 分钟内恢复可连；
+      // - KV 为最终一致（约 1 分钟）+ 缓存 TTL：新拉黑 IP 的边缘拦截至多
+      //   延后「约 1 分钟 + TTL」，由 DO 升级/握手层权威兜底；
+      //   解除封锁后恢复可连的时间同理；
       // - 未绑定 AUDIT_KV 或读取异常时跳过本层，回落到 DO 内检查（功能不变）。
       if (env.AUDIT_KV) {
         const clientIp = request.headers.get('CF-Connecting-IP') || '';
         if (clientIp) {
           try {
-            const bl = await env.AUDIT_KV.get(BL_SOCKET_KV_KEY, 'json');
+            const ttlMs = intEnv(env, 'IP_BLOCK_CACHE_MS', 30_000);
+            const bl = await lookupSocketBlacklist(env, ttlMs);
             if (Array.isArray(bl) && bl.some((e) => e && e.value === clientIp)) {
               return new Response('Forbidden', {
                 status: 403,

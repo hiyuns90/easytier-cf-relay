@@ -71,7 +71,7 @@ export function buildConfig(env) {
     serverPeerId: int(env, 'SERVER_PEER_ID', 10000001) >>> 0,
     serverNetworkName: str(env, 'SERVER_NETWORK_NAME', 'public_server'),
     serverHostname: str(env, 'SERVER_HOSTNAME', 'easytier-cf-relay'),
-    serverVersionStr: str(env, 'SERVER_VERSION_STR', 'easytier-cf-relay/1.3.0'),
+    serverVersionStr: str(env, 'SERVER_VERSION_STR', 'easytier-cf-relay/1.4.0'),
     avoidRelayData: bool(env, 'AVOID_RELAY_DATA', true),
     relayData: bool(env, 'RELAY_DATA', true),
     maxPeersPerRoom: int(env, 'MAX_PEERS_PER_ROOM', 64),
@@ -80,6 +80,8 @@ export function buildConfig(env) {
     peerIdleTimeoutMs: int(env, 'PEER_IDLE_TIMEOUT_MS', 75000),
     serverPingIdleMs: int(env, 'SERVER_PING_IDLE_MS', 40000),
     sweepIntervalMs: int(env, 'SWEEP_INTERVAL_MS', 15000),
+    // 空闲退避（v1.4.0）：房间无连接且无脏数据时的 alarm 间隔（0 = 关闭，退回 sweepIntervalMs）
+    sweepIdleIntervalMs: intOrZero(env, 'SWEEP_IDLE_INTERVAL_MS', 300_000),
     strictDigest: bool(env, 'STRICT_DIGEST', true),
     logLevel: str(env, 'LOG_LEVEL', 'info'),
     networkSecrets,
@@ -725,7 +727,7 @@ export class RelayRoom {
 
   _forward(ws, header, fullMessage) {
     if (ws._groupKey == null) return; // 未握手连接不允许转发
-    // F-06 加固：转发前校验源身份。包内 from_peer_id 必须与连接注册的
+    // 加固：转发前校验源身份。包内 from_peer_id 必须与连接注册的
     // peerId 一致，否则视为伪造（丢弃并计数），防源地址欺骗。
     if (header.fromPeerId !== ws._peerId) {
       this.counters.forgeries += 1;
@@ -907,19 +909,61 @@ export class RelayRoom {
       await this.audit.flush(now);
     }
 
-    // 重新挂 alarm
+    // 重新挂 alarm（自适应排程：有连接时对齐最近的 socket 事件时刻，
+    // 完全空闲时退避到 sweepIdleIntervalMs，见 _nextAlarmDelay）
     try {
-      await this.state.storage.setAlarm(now + cfg.sweepIntervalMs);
+      await this.state.storage.setAlarm(now + this._nextAlarmDelay(now));
     } catch (e) {
       this.log.warn(`re-arm alarm failed: ${e.message}`);
     }
   }
 
+  /**
+   * 自适应 alarm 排程（v1.4.0）：返回距下次 alarm 的毫秒数。
+   * - 有连接：min(sweepIntervalMs, 最早的 socket 事件时刻)，事件 =
+   *   未握手超时截止 / 探活触发 / 空闲超时截止（探活先于空闲超时发生）；
+   * - 无连接但有脏数据/审计待刷：sweepIntervalMs（尽快走完清扫落盘路径）；
+   * - 完全空闲：sweepIdleIntervalMs（0 则退回 sweepIntervalMs）。
+   * 下限 1000ms：防止事件截止时刻密集导致的秒级连环唤醒。
+   */
+  _nextAlarmDelay(now) {
+    const cfg = this.config;
+    let earliest = Infinity;
+    for (const ws of this.state.getWebSockets()) {
+      if (ws.readyState !== WS_OPEN) continue;
+      if (ws._peerId == null) {
+        const meta = this._loadAttachment(ws);
+        const connectedAt = meta.connectedAt ?? now;
+        earliest = Math.min(earliest, connectedAt + cfg.handshakeTimeoutMs);
+        continue;
+      }
+      const lastSeen = this._getLastSeen(ws);
+      if (cfg.serverPingIdleMs > 0) {
+        earliest = Math.min(earliest, lastSeen + cfg.serverPingIdleMs);
+      }
+      earliest = Math.min(earliest, lastSeen + cfg.peerIdleTimeoutMs);
+    }
+    if (earliest !== Infinity) {
+      return Math.max(1_000, Math.min(cfg.sweepIntervalMs, earliest - now));
+    }
+    if (this._dirty || this.audit.isDirty()) return cfg.sweepIntervalMs;
+    const idle = cfg.sweepIdleIntervalMs > 0 ? cfg.sweepIdleIntervalMs : cfg.sweepIntervalMs;
+    return idle;
+  }
+
   _markDirty() {
     this._dirty = true;
-    // 成员变化尽快落盘：若当前无近期 alarm，安排一个短 alarm
+    // 成员变化尽快落盘：仅在「无 alarm 或已有 alarm 比目标更晚」时才安排短 alarm。
+    // v1.4.0 修复：原版无条件 setAlarm(now+2000) 会（a）持续抖动时把闹钟无限推迟
+    // 造成清扫饥饿（幽灵节点/路由老化/落盘停摆），（b）产生冗余 storage 写，
+    // （c）破坏自适应排程把房间拽回 2s 一醒。现在绝不推迟已有更早的闹钟。
+    const target = Date.now() + 2000;
     try {
-      this.state.storage.setAlarm(Date.now() + 2000).catch(() => {});
+      this.state.storage.getAlarm().then((cur) => {
+        if (cur === null || cur > target) {
+          return this.state.storage.setAlarm(target);
+        }
+      }).catch(() => {});
     } catch { /* ignore */ }
   }
 
@@ -1022,7 +1066,7 @@ export class RelayRoom {
 
   /**
    * 删除分组（管理端，支持批量）：断开组内全部连接、清除路由/会话数据，
-   * 并在无同网络兄弟分组时删除摘要注册表条目（解除 F-05 抢占封锁）。
+   * 并在无同网络兄弟分组时删除摘要注册表条目（解除抢占封锁）。
    * 网络名同时进入黑名单 group 类（该网络的后续握手将被拒绝，可在黑名单页解除）。
    * body: {groupKey} | {groupKeys:[]} | {networkName} | {all:true}
    */

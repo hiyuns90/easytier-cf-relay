@@ -36,7 +36,7 @@ export function resolveGroupKey(config, digestRegistry, networkName, digestHex) 
     if (expected !== digestHex) {
       return { error: 'digest_mismatch' };
     }
-    // F-05 加固：已登记密钥的网络以服务端摘要为准（自愈注册表），
+    // 加固：已登记密钥的网络以服务端摘要为准（自愈注册表），
     // 先占者写入的错误摘要无法封锁持正确密钥的后来者。
     digestRegistry.set(name, expected);
     return { groupKey: `${name}:${expected}` };
@@ -136,7 +136,7 @@ export class PeerManager {
         peers: new Map(),
         infos: new Map(),
         rawInfos: new Map(),
-        infoSource: new Map(), // F-07：pid -> 'direct'（自报）| 'transit'（他报）
+        infoSource: new Map(), // pid -> 'direct'（自报）| 'transit'（他报）
         infoUpdatedAt: new Map(), // 幽灵防线：pid -> 最后接受该条目的服务端时间
         infoReporters: new Map(), // 幽灵防线：pid -> Set(上报该 transit 条目的在线节点)
         connVersions: new Map(),
@@ -286,7 +286,7 @@ export class PeerManager {
     if (source === 'transit' && g.peers.has(pid)) {
       return { isNew: false, changed: false, rejected: true };
     }
-    // F-07 加固：他报（transit）信息不得覆盖直连成员的自报（direct）信息，
+    // 加固：他报（transit）信息不得覆盖直连成员的自报（direct）信息，
     // 防止路由投毒污染在线成员的路由条目。直连成员离线后其条目随 removePeer 删除，
     // 此时 transit 信息可重新作为唯一来源被接受（保持 mesh 可达性）。
     if (source === 'transit' && existingSource === 'direct') {

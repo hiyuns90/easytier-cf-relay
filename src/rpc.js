@@ -247,7 +247,7 @@ async function handleSyncRouteInfo(ctx, ws, header, rpcPacket, innerBody) {
   const rawItems = extractRawPeerInfos(innerBody);
 
   // 合并对端上报的 peer 信息。
-  // F-07 加固：条目 peerId === 上报者本人 -> direct（可信自报）；
+  // 加固：条目 peerId === 上报者本人 -> direct（可信自报）；
   // 其余为 transit（他报），PeerManager 会拒绝其覆盖 direct 条目（防路由投毒）。
   let hasNew = false;
   const items = (req.peerInfos && req.peerInfos.items) || [];
@@ -304,7 +304,7 @@ async function handleReportPeers(ctx, ws, header, rpcPacket, innerBody) {
     return;
   }
   // 官方语义（peer_center/server.rs::report_peers）：整体替换该上报方的条目。
-  // F-08 加固：上报者身份以连接注册的 header.fromPeerId 为准（连接级鉴权），
+  // 加固：上报者身份以连接注册的 header.fromPeerId 为准（连接级鉴权），
   // 内层 my_peer_id 不一致时覆盖（防冒名上报他人直连表）。
   const reporter = header.fromPeerId;
   if (Number(req.myPeerId) !== reporter) {

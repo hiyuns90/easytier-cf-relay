@@ -816,18 +816,31 @@ $('save').onclick = function () {
   loadTab().then(refreshSideCounters);
 };
 $('refresh').onclick = function () { loadTab(); refreshSideCounters(); };
+// 自动刷新（v1.4.0 省额度）：间隔 10s -> 30s，改用递归 setTimeout，
+// 且页面不可见（后台标签页/最小化）时暂停，visibilitychange 恢复。
+// 后台刷新不产生任何观测价值，却持续消耗 Worker 请求额度。
+var AUTO_REFRESH_MS = 30000;
 $('auto').onchange = setAuto;
-function setAuto() {
-  if (window.__t) { clearInterval(window.__t); window.__t = null; }
-  if ($('auto').checked) {
-    window.__t = setInterval(function () {
-      // 自动刷新保留勾选；当前已在 overview 时无需重复拉取侧边栏计数；
-      // 记录设置页不自动刷新（避免覆盖未保存的编辑）
-      if (TAB !== 'reccfg') loadTab(true);
-      if (TAB !== 'overview') refreshSideCounters();
-    }, 10000);
-  }
+function tick() {
+  window.__t = setTimeout(function () {
+    // 自动刷新保留勾选；当前已在 overview 时无需重复拉取侧边栏计数；
+    // 记录设置页不自动刷新（避免覆盖未保存的编辑）
+    if (TAB !== 'reccfg') loadTab(true);
+    if (TAB !== 'overview') refreshSideCounters();
+    tick();
+  }, AUTO_REFRESH_MS);
 }
+function setAuto() {
+  if (window.__t) { clearTimeout(window.__t); window.__t = null; }
+  if ($('auto').checked && document.visibilityState === 'visible') tick();
+}
+document.addEventListener('visibilitychange', function () {
+  if (window.__t && document.visibilityState !== 'visible') {
+    clearTimeout(window.__t); window.__t = null;
+  } else if (!window.__t && $('auto').checked) {
+    tick();
+  }
+});
 if (localStorage.getItem('et_admin_token')) { $('token').value = '••••••••'; }
 loadTab().then(refreshSideCounters);
 setAuto();

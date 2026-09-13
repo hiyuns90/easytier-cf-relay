@@ -3,7 +3,7 @@
 
 name = "easytier-cf-relay"
 main = "src/index.js"
-compatibility_date = "2026-09-05"
+compatibility_date = "2026-09-13"
 compatibility_flags = ["nodejs_compat"]
 
 # WebSocket Hibernation 需要的最低兼容日期为 2024-04-03
@@ -16,7 +16,9 @@ SERVER_PEER_ID = "10000001"
 # 服务端在握手响应中宣告的网络名（与客户端网络名不同 => 外部网络中继模式）
 SERVER_NETWORK_NAME = "public_server"
 SERVER_HOSTNAME = "easytier-cf-relay"
-SERVER_VERSION_STR = "easytier-cf-relay/1.3.0"
+SERVER_VERSION_STR = "easytier-cf-relay/1.4.0"
+# 指定 Durable Object 地区配置（可选值：wnam 西部地区（北美）enam 东部地区（北美）sam 南美洲 weur 西欧 eeur 东欧 apac	亚太地区（已设置，默认未开启） oc 大洋洲 afr 非洲 me 中东）
+# LOCATION_HINT = "apac"
 # 纯 P2P 模式：1 = 在 feature_flag 中宣告 avoid_relay_data（OSPF 给本节点边赋大代价，
 # 客户端优先直连 P2P，中继仅作兜底）；0 = 不宣告
 AVOID_RELAY_DATA = "1"
@@ -32,8 +34,11 @@ HANDSHAKE_TIMEOUT_MS = "15000"
 PEER_IDLE_TIMEOUT_MS = "75000"
 # 服务端主动 ping 阈值（毫秒）：空闲超过该值发送 Ping 探活
 SERVER_PING_IDLE_MS = "40000"
-# 清扫周期（毫秒），alarm 按此周期唤醒 DO 检查
+# 清扫周期（毫秒），alarm 按自适应排程唤醒 DO（有连接时至多该周期一次）
 SWEEP_INTERVAL_MS = "15000"
+# 空闲退避（毫秒）：房间无连接且无脏数据时 alarm 退避到该间隔（默认 5 分钟），
+# 空房间消耗从 5760 请求/天降至 288；0 = 关闭（退回 SWEEP_INTERVAL_MS）
+SWEEP_IDLE_INTERVAL_MS = "300000"
 # 摘要策略：1 = 同一网络名出现不同摘要时拒绝（默认，防抢占/防嗅探）；0 = 隔离为不同分组
 STRICT_DIGEST = "1"
 # 幽灵节点老化（对齐官方 clear_expired_peer）：
@@ -65,6 +70,10 @@ BLACKLIST_LIMIT = "1000"
 # 这是硬设置 —— 管理页无法关闭 admin 类记录，也无法删除其内容
 ADMIN_AUDIT = "1"
 ADMIN_AUDIT_LIMIT = "200"
+# 边缘层 IP 黑名单缓存（毫秒）：isolate 内缓存 bl:socket 的 KV 读结果，
+# 重连风暴时 KV 读从每次连接 1 次降为每 TTL 1 次。只延后拦截、绝不漏放
+# （缓存未命中照旧放行走 DO 权威检查）。0 = 关闭
+IP_BLOCK_CACHE_MS = "30000"
 # 可选：JSON 映射 {"网络名":"网络密钥"}，配置后服务端校验客户端摘要（SipHash-1-3）
 # NETWORK_SECRETS = "{\"default\":\"my-secret\"}"
 # 可选：DO 房间分片。默认单一房间 "global"；配置后可按 Header/Query 切分房间
@@ -80,6 +89,8 @@ ADMIN_AUDIT_LIMIT = "200"
 # METRICS_PATH = "/m-please-change-me"
 # 统计端点 token（与 METRICS_PATH 同时配置才启用；支持 Bearer 头或 ?token= 参数）
 # METRICS_TOKEN = "please-change-me-to-a-long-random-string"
+# 健康检查路径（默认 /health）。配置后仅该路径返回 {"ok":true}，原 /health 返回 404（防指纹扫描，无需 token）
+# HEALTH_PATH = "/health"
 # Web 管理端路径（需与 ADMIN_TOKEN 同时配置才启用；页面壳公开、数据 API 鉴权）
 # ADMIN_PATH = "/admin-please-change-me"
 # 管理端 token（状态查看 / 踢出节点 / 删除分组）

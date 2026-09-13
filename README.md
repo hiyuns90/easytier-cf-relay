@@ -1,12 +1,11 @@
-# EasyTier Cloudflare Relay V1.3.0
+# EasyTier Cloudflare Relay V1.4.0
 
 在 Cloudflare Workers 免费额度内运行 EasyTier 自建 WebSocket 节点——无需 VPS，
-客户端 `-p wss://<你的域名>/` 即可组网。纯 P2P 优先（中继仅兜底），
-全 Hibernation API 空闲成本趋零。
+客户端 `-p wss://<你的域名>/` 即可组网。纯 P2P 优先（中继仅兜底），全 Hibernation API 空闲成本趋零。
 
 已用 easytier-core **2.6.4** 官方客户端实测：握手、路由同步、双节点互见、数据中继全部通过。
 
-由于作者不太会Workers的开发，所以使用了国模**GLM5.3**进行全栈开发。虽然与国模经历来回扯皮，但是可能仍然有一些不影响使用的特性，下个版本会继续修，欢迎各位有想法的fork修理。（token很紧缺，总花费可以看更新日志）
+由于作者不太会Workers的开发，所以使用了国模**GLM5.3**进行全栈开发。虽然与国模进行了不少友好交流，但是可能仍然有一些不影响使用的特性，下个版本会继续修，欢迎各位有想法的fork修理。（本次更新花费有点大，总花费可以看更新日志）
 
 这是作者使用本项目部署好的节点[wss://ouret.ccwu.cc](https://ouret.ccwu.cc/)（由于免费额度有限，为了让更多人使用，已禁中转）
 
@@ -18,7 +17,8 @@
 - **幽灵节点六重防线**：握手超时 / 空闲超时 / 主动探活（连接级）+
   direct 覆盖规则与 reporter 追踪 / 路由老化（对齐官方 `clear_expired_peer`）/ 空分组自动删除（路由级）——
   彻底解决多 PeerId 竞争残留的"幽灵路由条目"
-- **安全加固**：`/health` 零指纹；`/metrics` 与管理端为自定义安全路径 + token 双门禁（fail-closed）；
+- **安全加固**：`/health` 零指纹（`HEALTH_PATH` 可自定义，配置后原路径 404）；
+  `/metrics` 与管理端为自定义安全路径 + token 双门禁（fail-closed）；
   转发校验源身份、防路由投毒、防摘要抢占（注册表自愈）
 - **Web 管理端**：侧边栏列表式导航（总览/节点/路由/互联/连接/分组/摘要注册/记录/黑名单），
   服务端分页 + 列表独立滚动（节点多时不爆炸），各功能块自带统计，
@@ -30,9 +30,12 @@
   **硬设置**（wrangler.toml `ADMIN_AUDIT`，管理页不可关闭；查看事件不记录）
 - **管理端黑名单**：分四类（节点 PeerId / 网络分组 / 摘要注册 / 客户端 IP），每类一条 KV 键；
   踢出节点、删除分组、删除摘要、断开连接的操作对象自动进入黑名单并被拦截接入——
-  IP 黑名单在 **Worker 入口边缘层直接拒绝（KV 直读，不唤醒 DO）**，重连风暴不消耗
-  DO 请求与审计写入；黑名单页支持手工添加 / 移除（解除封锁）/ 批量清空
+  IP 黑名单在 **Worker 入口边缘层直接拒绝（KV 读取带 30s isolate 缓存，不唤醒 DO）**，
+  重连风暴不消耗 DO 请求与审计写入，KV 读也与重连次数解耦；
+  黑名单页支持手工添加 / 移除（解除封锁）/ 批量清空
 - **免费额度内稳定运行**：Hibernation + alarm 驱动，典型小网络日请求量约为限额的 5%；
+  alarm 自适应排程（有连接对齐最近事件、空房间退避 5 分钟）+ `_markDirty`
+  闹钟抖动修复；管理页自动刷新 30s 且页面不可见时暂停；
   KV 审计经内存缓冲 + DO storage + 节流镜像三级写入，写入量可控（见部署手册成本章节）
   ![p](p.png)
 
@@ -83,20 +86,10 @@ Cloudflare 控制台设置；本地 `wrangler dev` 如需覆盖可用 `.dev.vars
 
 本项目站在前人肩膀上，感谢以下项目：
 
-- **[EasyTier](https://github.com/EasyTier/EasyTier)** — 官方去中心化 mesh VPN。
-  本实现的协议行为全部以官方源码（tag v2.6.4）为基准逐项对齐，
-  并以官方客户端实测验证兼容性。
-- **[IceSoulHanxi/easytier-ws-relay](https://github.com/IceSoulHanxi/easytier-ws-relay)** —
-  最早的 Cloudflare Workers 版 EasyTier WS 中继之一。
-  其"幽灵节点"痛点直接催生了本项目的六重防线设计（握手超时 / 空闲超时 / 主动探活 +
-  路由级老化管理）。
-- **[Teleseon/cf-workers-et-ws](https://github.com/Teleseon/cf-workers-et-ws)** —
-  活跃改进的 fork。其 DO 计费与 protobuf 兼容性经验（setInterval 常驻计费、
-  Workers 上的 eval 限制）直接影响了本项目"全 Hibernation + pbjs 静态代码生成"的技术路线。
-- **[21paradox/easytier-wsrelay](https://github.com/21paradox/easytier-wsrelay)** 与
-  **[PIKACHUIM/easytier-worker](https://github.com/PIKACHUIM/easytier-worker)** —
-  社区多语言/带面板方向的探索，其踩过的协议细节坑（PacketType 枚举、method_index 基数等）
-  为本项目"逐字段对照官方源码修正"提供了前车之鉴。
+- **[EasyTier](https://github.com/EasyTier/EasyTier)** — 官方去中心化 mesh VPN。本实现的协议行为全部以官方源码（tag v2.6.4）为基准逐项对齐，并以官方客户端实测验证兼容性。
+- **[IceSoulHanxi/easytier-ws-relay](https://github.com/IceSoulHanxi/easytier-ws-relay)** —最早的 Cloudflare Workers 版 EasyTier WS 中继之一。其"幽灵节点"痛点直接催生了本项目的六重防线设计（握手超时 / 空闲超时 / 主动探活 +路由级老化管理）。
+- **[Teleseon/cf-workers-et-ws](https://github.com/Teleseon/cf-workers-et-ws)** —活跃改进的 fork。其 DO 计费与 protobuf 兼容性经验（setInterval 常驻计费、Workers 上的 eval 限制）直接影响了本项目"全 Hibernation + pbjs 静态代码生成"的技术路线。
+- **[21paradox/easytier-wsrelay](https://github.com/21paradox/easytier-wsrelay)** 与**[PIKACHUIM/easytier-worker](https://github.com/PIKACHUIM/easytier-worker)** —社区多语言/带面板方向的探索，其踩过的协议细节坑（PacketType 枚举、method_index 基数等）为本项目"逐字段对照官方源码修正"提供了前车之鉴。
 
 ## 许可
 
