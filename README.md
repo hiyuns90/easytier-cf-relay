@@ -89,7 +89,7 @@ Cloudflare 控制台设置；本地 `wrangler dev` 如需覆盖可用 `.dev.vars
 - **[EasyTier](https://github.com/EasyTier/EasyTier)** — 官方去中心化 mesh VPN。本实现的协议行为全部以官方源码（tag v2.6.4）为基准逐项对齐，并以官方客户端实测验证兼容性。
 - **[IceSoulHanxi/easytier-ws-relay](https://github.com/IceSoulHanxi/easytier-ws-relay)** —最早的 Cloudflare Workers 版 EasyTier WS 中继之一。其"幽灵节点"痛点直接催生了本项目的六重防线设计（握手超时 / 空闲超时 / 主动探活 +路由级老化管理）。
 - **[Teleseon/cf-workers-et-ws](https://github.com/Teleseon/cf-workers-et-ws)** —活跃改进的 fork。其 DO 计费与 protobuf 兼容性经验（setInterval 常驻计费、Workers 上的 eval 限制）直接影响了本项目"全 Hibernation + pbjs 静态代码生成"的技术路线。
-- **[21paradox/easytier-wsrelay](https://github.com/21paradox/easytier-wsrelay)** 与**[PIKACHUIM/easytier-worker](https://github.com/PIKACHUIM/easytier-worker)** —社区多语言/带面板方向的探索，其踩过的协议细节坑（PacketType 枚举、method_index 基数等）为本项目"逐字段对照官方源码修正"提供了前车之鉴。
+- **[21paradox/easytier-wsrelay](https://github.com/21paradox/easytier-wsrelay)** 与 **[PIKACHUIM/easytier-worker](https://github.com/PIKACHUIM/easytier-worker)** —社区多语言/带面板方向的探索，其踩过的协议细节坑（PacketType 枚举、method_index 基数等）为本项目"逐字段对照官方源码修正"提供了前车之鉴。
 
 ## 许可
 
