@@ -40,6 +40,7 @@
  */
 import { RelayRoom } from './room.js';
 import { ADMIN_HTML } from './admin_ui.js';
+import { FAVICON_PNG } from './assets.js';
 import { BL_SOCKET_KV_KEY } from './audit.js';
 
 export { RelayRoom };
@@ -144,6 +145,13 @@ export default {
       return Response.json({ ok: true });
     }
 
+    // 站点图标（v1.4.1）：内嵌 PNG（128x128），浏览器缓存 1 天避免重复请求
+    if (url.pathname === '/favicon.ico') {
+      return new Response(FAVICON_PNG, {
+        headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' },
+      });
+    }
+
     if (!env.RELAY_ROOM) {
       return new Response('RELAY_ROOM binding missing', { status: 500 });
     }
@@ -194,9 +202,22 @@ export default {
       }
       const roomId = resolveRoomId(request, url, env);
       const stub = env.RELAY_ROOM.get(env.RELAY_ROOM.idFromName(roomId));
+      // 升级请求必须原样转发（构造副本会破坏升级流，workerd 不支持）；
+      // 「Upgrade 头 + /internal/*」的鉴权绕过由 DO 层守卫统一拦截（room.js fetch）。
       return stub.fetch(request);
     }
 
+    // 其余未知路径（v1.4.1）：一律挂起不响应（tar pit）——不返回 404、不泄露
+    // 服务器行为指纹，让路径扫描器空等到自身超时。仅影响非 WS 升级请求
+    // （EasyTier 客户端只走升级，不受影响）；健康检查/favicon/统计/管理端等
+    // 保留路径在上方各有自己的响应。CPU 成本为零（纯挂起流），
+    // TARPIT_UNKNOWN="0" 关闭（恢复 404，排障用）。
+    if (str(env, 'TARPIT_UNKNOWN', '1') !== '0') {
+      return new Response(new ReadableStream({ /* 永不 enqueue/close */ }), {
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream' },
+      });
+    }
     return new Response('Not found', { status: 404 });
   },
 };

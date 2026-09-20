@@ -17,6 +17,7 @@ export const ADMIN_HTML = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/png" href="/favicon.ico">
 <title>EasyTier CF Relay 控制台</title>
 <style>
   :root{color-scheme:dark;--bg:#0f172a;--panel:#1e293b;--panel2:#16213a;--line:#334155;--fg:#e2e8f0;--muted:#94a3b8;--dim:#64748b;--accent:#0ea5e9;--ok:#34d399;--warn:#f59e0b;--bad:#f87171}

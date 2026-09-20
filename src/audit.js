@@ -2,9 +2,9 @@
  * KV 审计存储：事件记录（连接/路由/互联/摘要等）+ 管理端黑名单。
  *
  * 设计（针对 Cloudflare 免费额度的成本控制）：
- * 1. 键值布局 —— 每类信息只占一条 KV 键：
- *    - 记录：et-relay:rec:<type>，type ∈ groups|peers|routes|peercenter|sockets|digests|admin
- *    - 黑名单：et-relay:bl:<cat>，cat ∈ peer|group|digest|socket
+ * 1. 键值布局 —— 每类信息只占一条 KV 键（v1.4.1 起前缀为项目名，旧前缀仅迁移读取）：
+ *    - 记录：easytier-cf-relay:rec:<type>，type ∈ groups|peers|routes|peercenter|sockets|digests|admin
+ *    - 黑名单：easytier-cf-relay:bl:<cat>，cat ∈ peer|group|digest|socket
  *    - 记录查询支持 type=all：跨类型按 id（全局时序）倒序合并，无需额外 KV 键
  * 2. 三级写入路径：
  *    - 事件发生 → 仅写内存（零成本）；
@@ -30,13 +30,15 @@ const RUNTIME_TYPES = ['groups', 'peers', 'routes', 'peercenter', 'sockets', 'di
 export const BLACKLIST_CATS = ['peer', 'group', 'digest', 'socket'];
 
 const STATE_KEY = 'audit_state';
-const KV_PREFIX = 'et-relay:';
+/** v1.4.1：KV 键前缀由 et-relay: 更名为项目名 easytier-cf-relay: */
+const KV_PREFIX = 'easytier-cf-relay:';
+/** 旧前缀（v1.4.0 及之前）：仅用于一次性迁移读取，绝不写入 */
+const LEGACY_KV_PREFIX = 'et-relay:';
 /**
  * socket（客户端 IP）黑名单的 KV 键：Worker 入口边缘拦截只读这一条键，
  * 命中直接 403，不唤醒 Durable Object（省 DO 请求与时长计费）。
  */
-export const BL_SOCKET_KV_KEY = KV_PREFIX + 'bl:socket';
-/** 管理端审计：同一 IP 的登录记录折叠窗口 */
+export const BL_SOCKET_KV_KEY = KV_PREFIX + 'bl:socket';/** 管理端审计：同一 IP 的登录记录折叠窗口 */
 const LOGIN_DEDUP_MS = 10 * 60_000;
 
 /** 黑名单类别与记录类别的合法值归一化（peer 为数字，其余为字符串） */
@@ -101,14 +103,30 @@ export class AuditStore {
     }
     // 冷启动回退：DO storage 为空（首次部署/被重置）时从 KV 恢复
     if (this.kv) {
+      let restored = false;
       try {
         for (const t of RECORD_TYPES) {
           const v = await this.kv.get(KV_PREFIX + 'rec:' + t, 'json');
-          if (Array.isArray(v) && v.length) this.records.set(t, v);
+          if (Array.isArray(v) && v.length) { this.records.set(t, v); restored = true; }
         }
         for (const c of BLACKLIST_CATS) {
           const v = await this.kv.get(KV_PREFIX + 'bl:' + c, 'json');
-          if (Array.isArray(v) && v.length) this.blacklist.set(c, v);
+          if (Array.isArray(v) && v.length) { this.blacklist.set(c, v); restored = true; }
+        }
+        // 一次性迁移（v1.4.1）：新前缀完全无数据时回读旧前缀（et-relay:），
+        // 数据随后由正常刷盘写入新键；旧键保留不删（零成本，留回滚路径，
+        // 确认运行正常后可手动删除）。
+        if (!restored) {
+          let legacy = false;
+          for (const t of RECORD_TYPES) {
+            const v = await this.kv.get(LEGACY_KV_PREFIX + 'rec:' + t, 'json');
+            if (Array.isArray(v) && v.length) { this.records.set(t, v); legacy = true; }
+          }
+          for (const c of BLACKLIST_CATS) {
+            const v = await this.kv.get(LEGACY_KV_PREFIX + 'bl:' + c, 'json');
+            if (Array.isArray(v) && v.length) { this.blacklist.set(c, v); legacy = true; }
+          }
+          if (legacy) this.log.info('audit KV data migrated from legacy "et-relay:" keys');
         }
       } catch (e) {
         this.log.warn(`audit kv restore failed: ${e.message}`);
@@ -178,11 +196,16 @@ export class AuditStore {
     this._lastKvFlush = now;
     const keys = Array.from(this._kvDirty);
     this._kvDirty.clear();
+    // v1.4.1：分批写 KV——免费计划单次调用同时打开的连接数上限为 6，
+    // 脏键最多 11 个（7 记录 + 4 黑名单），一次性 Promise.all 会触发排队。
+    const CHUNK = 6;
     try {
-      await Promise.all(keys.map((k) => this.kv.put(
-        KV_PREFIX + k,
-        JSON.stringify(k.startsWith('rec:') ? this.records.get(k.slice(4)) : this.blacklist.get(k.slice(3)))
-      )));
+      for (let i = 0; i < keys.length; i += CHUNK) {
+        await Promise.all(keys.slice(i, i + CHUNK).map((k) => this.kv.put(
+          KV_PREFIX + k,
+          JSON.stringify(k.startsWith('rec:') ? this.records.get(k.slice(4)) : this.blacklist.get(k.slice(3)))
+        )));
+      }
     } catch (e) {
       this.log.warn(`audit flush to kv failed: ${e.message}`);
       for (const k of keys) this._kvDirty.add(k); // 失败下轮重试

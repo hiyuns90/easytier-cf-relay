@@ -71,10 +71,14 @@ export function buildConfig(env) {
     serverPeerId: int(env, 'SERVER_PEER_ID', 10000001) >>> 0,
     serverNetworkName: str(env, 'SERVER_NETWORK_NAME', 'public_server'),
     serverHostname: str(env, 'SERVER_HOSTNAME', 'easytier-cf-relay'),
-    serverVersionStr: str(env, 'SERVER_VERSION_STR', 'easytier-cf-relay/1.4.0'),
+    serverVersionStr: str(env, 'SERVER_VERSION_STR', 'easytier-cf-relay/1.4.1'),
     avoidRelayData: bool(env, 'AVOID_RELAY_DATA', true),
     relayData: bool(env, 'RELAY_DATA', true),
     maxPeersPerRoom: int(env, 'MAX_PEERS_PER_ROOM', 64),
+    // 单 IP 并发连接上限（v1.4.1）：防单 IP 用普通握手占满房间（0 = 关闭）。
+    // 仅 DO 升级层权威检查（边缘层无状态无法计数）；同 NAT 多节点共享出口 IP，
+    // 默认 6 兼顾绝大多数场景。
+    maxConnsPerIp: intOrZero(env, 'MAX_CONNS_PER_IP', 6),
     maxMessageBytes: int(env, 'MAX_MESSAGE_BYTES', 131072),
     handshakeTimeoutMs: int(env, 'HANDSHAKE_TIMEOUT_MS', 15000),
     peerIdleTimeoutMs: int(env, 'PEER_IDLE_TIMEOUT_MS', 75000),
@@ -139,6 +143,8 @@ export class RelayRoom {
       // 黑名单拦截次数（v1.3.0：拒绝不再逐条写记录，改由计数器观测；
       // 边缘层【Worker 入口】拒绝的连接不会到达 DO，不在此计数）
       blRejected: 0,
+      // 单 IP 并发上限拦截次数（v1.4.1，DO 升级层口径）
+      ipLimited: 0,
     };
     this.startedAt = Date.now();
     this._dirty = false;
@@ -231,6 +237,14 @@ export class RelayRoom {
     await this._initPromise;
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // v1.4.1 安全修复：内部端点只接受 index.js 鉴权后的改写转发（无 Upgrade 头）。
+    // Worker 入口会把带 Upgrade 头的任意路径请求原样转发到 DO——若不拦截，
+    // 攻击者可用「Upgrade: websocket 头 + /internal/* 路径」直达内部端点，
+    // 绕过 ADMIN_TOKEN / METRICS_TOKEN 鉴权（读统计、删记录等）。
+    if (path.startsWith('/internal/') && request.headers.get('Upgrade') === 'websocket') {
+      return new Response('Not found', { status: 404 });
+    }
 
     if (path === '/internal/stats') {
       return Response.json(this._stats());
@@ -368,6 +382,24 @@ export class RelayRoom {
     if (this.pm.totalPeers() >= this.config.maxPeersPerRoom) {
       return new Response('Room full', { status: 429 });
     }
+    // 单 IP 并发连接上限（v1.4.1）：与黑名单不同，这是事前限流——
+    // 攻击者无需触发任何警报即可用普通握手占满房间，此检查补上该缺口。
+    if (this.config.maxConnsPerIp > 0 && clientIp) {
+      let same = 0;
+      for (const s of this.state.getWebSockets()) {
+        if (s.readyState !== WS_OPEN) continue;
+        const ip = s._clientIp ?? this._loadAttachment(s).clientIp;
+        if (ip === clientIp) same += 1;
+      }
+      if (same >= this.config.maxConnsPerIp) {
+        this.counters.ipLimited += 1;
+        this.log.warn(`connection rejected (per-ip limit): ip=${clientIp} open=${same}`);
+        return new Response('Too many connections', {
+          status: 429,
+          headers: { 'retry-after': '60' },
+        });
+      }
+    }
 
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
@@ -413,6 +445,7 @@ export class RelayRoom {
     ws._groupKey = meta.groupKey ?? null;
     ws._networkName = meta.networkName ?? null;
     ws._domainName = meta.domainName ?? null;
+    ws._clientIp = meta.clientIp ?? null; // v1.4.1：随 attachment 恢复（per-IP 计数依赖）
     ws._serverSessionId = meta.serverSessionId
       ? toU64Long(meta.serverSessionId)
       : randomU64Long();
@@ -435,6 +468,8 @@ export class RelayRoom {
         groupKey: ws._groupKey ?? null,
         networkName: ws._networkName ?? null,
         domainName: ws._domainName ?? null,
+        // clientIp 持久化（v1.4.1）：休眠重启后 per-IP 并发计数与连接列表 IP 展示依赖
+        clientIp: ws._clientIp ?? null,
         serverSessionId: ws._serverSessionId ? ws._serverSessionId.toString() : null,
         connectedAt: ws._connectedAt ?? Date.now(),
         handshakedAt: ws._handshakedAt ?? null,
