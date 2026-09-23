@@ -121,3 +121,8 @@ new_sqlite_classes = ["RelayRoom"]
 # 说明：
 # - 使用 new_sqlite_classes（存储后端为 SQLite，免费额度内即支持 Hibernation API）
 # - 若已有旧部署（new_classes），不要重复添加迁移，参考部署手册"迁移"章节
+HEALTH_PATH = "/h-9f85b92c"
+METRICS_PATH = "/m-a26faf85"
+METRICS_TOKEN = "ea40313b2028d43a8814c8220a0870d9"
+ADMIN_PATH = "/console-d90482fe"
+ADMIN_TOKEN = "941f9b6650516eb750b7bb77c9cdaf56"
